@@ -1,13 +1,52 @@
-- name: Parchar Android
+name: Build APK Android
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Descomprimir proyecto
+        run: |
+          ZIP=$(ls *.zip | head -n1)
+          echo "Usando $ZIP"
+          unzip -q "$ZIP" -d extracted
+          PUB=$(find extracted -name pubspec.yaml -print -quit)
+          echo "PROJ=$(dirname "$PUB")" >> $GITHUB_ENV
+
+      - name: Generar Android y restaurar mi código
         run: |
           cd "$PROJ"
+          mkdir -p /tmp/bak
+          cp -r lib /tmp/bak/lib
+          cp pubspec.yaml /tmp/bak/pubspec.yaml
+          flutter create --org com.distortionlabs --project-name distortion_labs_iptv --platforms=android .
+          rm -rf lib
+          cp -r /tmp/bak/lib lib
+          cp /tmp/bak/pubspec.yaml pubspec.yaml
 
-          # Forzar compileSdk y targetSdk directamente en build.gradle.kts
+      - name: Parchar Android
+        run: |
+          cd "$PROJ"
           cat > android/app/build.gradle.kts << 'EOL'
           plugins {
               id("com.android.application")
               id("kotlin-android")
-              // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
               id("dev.flutter.flutter-gradle-plugin")
           }
 
@@ -45,22 +84,16 @@
           }
           EOL
 
-          echo "=== build.gradle.kts forzado ==="
-          cat android/app/build.gradle.kts
-          echo "================================"
-
-          # Parchear AndroidManifest
           python3 << 'EOF'
           from pathlib import Path
+          import re
+
           m = Path("android/app/src/main/AndroidManifest.xml")
           s = m.read_text()
           if "xmlns:tools" not in s:
               s = s.replace("<manifest ", '<manifest xmlns:tools="http://schemas.android.com/tools" ', 1)
           if "FOREGROUND_SERVICE_MEDIA_PLAYBACK" not in s:
-              perms = "".join(
-                  f'    <uses-permission android:name="android.permission.{p}"/>\n'
-                  for p in ["INTERNET", "WAKE_LOCK", "FOREGROUND_SERVICE", "FOREGROUND_SERVICE_MEDIA_PLAYBACK", "POST_NOTIFICATIONS"]
-              )
+              perms = "".join(f'    <uses-permission android:name="android.permission.{p}"/>\n' for p in ["INTERNET", "WAKE_LOCK", "FOREGROUND_SERVICE", "FOREGROUND_SERVICE_MEDIA_PLAYBACK", "POST_NOTIFICATIONS"])
               s = s.replace("<application", perms + "    <application", 1)
               s = s.replace("<application", '<application android:usesCleartextTraffic="true"', 1)
           if "AudioService" not in s:
@@ -77,18 +110,22 @@
           </application>'''
               s = s.replace("</application>", block, 1)
           m.write_text(s)
-          print("AndroidManifest parcheado")
-          EOF
 
-          # Parchear MainActivity
-          python3 << 'EOF'
-          import re
-          from pathlib import Path
           for f in Path("android/app/src/main").rglob("MainActivity.*"):
               if f.suffix == ".kt":
                   content = f.read_text()
                   pkg = re.search(r"package\s+([\w.]+)", content).group(1)
                   f.write_text(f"package {pkg}\n\nimport com.ryanheise.audioservice.AudioServiceActivity\n\nclass MainActivity : AudioServiceActivity()\n")
-                  print(f"MainActivity parcheado: {f}")
-          print("Listo")
+          print("Android parcheado correctamente")
           EOF
+
+      - name: Compilar APK
+        run: |
+          cd "$PROJ"
+          flutter pub get
+          flutter build apk --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distortion-labs-iptv-apk
+          path: extracted/**/build/app/outputs/flutter-apk/app-release.apk
